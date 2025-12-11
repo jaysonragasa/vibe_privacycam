@@ -29,7 +29,8 @@
             position: absolute;
             top: 50%;
             left: 50%;
-            transform: translate(-50%, -50%);
+            /* Transform is now handled in JS to support rotation/mirroring */
+            transform: translate(-50%, -50%); 
             max-width: 100%;
             max-height: 100%;
             object-fit: contain;
@@ -125,7 +126,7 @@
         <p class="text-gray-400 text-sm">Loading AI Models...</p>
     </div>
 
-    <!-- Ratio Toast -->
+    <!-- Ratio/Rotate Toast -->
     <div id="ratio-toast" class="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-40 pointer-events-none opacity-0 transition-opacity duration-300">
         <div class="glass-panel px-6 py-3 rounded-full">
             <span id="ratio-text" class="text-white font-bold text-xl tracking-widest">FULL</span>
@@ -138,13 +139,19 @@
     <!-- Main Output Canvas -->
     <canvas id="output-canvas"></canvas>
 
-    <!-- Top Bar: Status & Time -->
+    <!-- Top Bar: Status & Time & Rotate -->
     <div class="absolute top-0 left-0 w-full p-4 flex justify-between items-start z-20 pointer-events-none">
         <div id="recording-indicator" class="hidden flex items-center space-x-2 bg-red-500/20 px-3 py-1 rounded-full backdrop-blur-sm border border-red-500/30">
             <div class="w-3 h-3 bg-red-500 rounded-full recording-dot"></div>
             <span id="timer" class="text-white text-sm font-mono font-bold">00:00</span>
         </div>
-        <div class="flex-1"></div> <!-- Spacer -->
+        
+        <!-- Rotate Button (Pointer events enabled) -->
+        <div class="flex-1 flex justify-end">
+            <button id="rotate-btn" class="pointer-events-auto p-2 rounded-full glass-panel hover:bg-gray-800 transition-colors">
+                <i data-lucide="rotate-cw" class="w-5 h-5 text-white"></i>
+            </button>
+        </div>
     </div>
 
     <!-- Settings Panel (Compact) -->
@@ -259,7 +266,9 @@
                 widthScale: 1.2,
                 heightScale: 1.2,
                 facingMode: 'user', // 'user' or 'environment'
-                aspectRatio: 'full' // 'full', '1:1', '3:4', '9:16' (keys only, logic adapts)
+                aspectRatio: 'full', // 'full', '1:1', '3:4', '9:16'
+                rotation: 0, // Manual rotation: 0, 90, 180, 270
+                isMirrored: false // Auto-mirror for selfie cam
             },
             crop: { x: 0, y: 0, w: 0, h: 0 },
             renderId: null,
@@ -310,6 +319,10 @@
                 }
             };
 
+            // Set Mirroring based on facing mode (Selfies should be mirrored)
+            state.settings.isMirrored = (state.settings.facingMode === 'user');
+            updateCanvasTransform();
+
             state.stream = await navigator.mediaDevices.getUserMedia(constraints);
             state.video.srcObject = state.stream;
             
@@ -321,6 +334,13 @@
                     resolve();
                 };
             });
+        }
+
+        function updateCanvasTransform() {
+            const { rotation, isMirrored } = state.settings;
+            // Apply Centering + Rotation + Mirroring
+            // Note: Mirroring (scaleX) handles horizontal flip. Rotation handles orientation.
+            state.canvas.style.transform = `translate(-50%, -50%) rotate(${rotation}deg) scaleX(${isMirrored ? -1 : 1})`;
         }
 
         function resizeCanvas() {
@@ -565,6 +585,7 @@
             const settingsBtn = document.getElementById('settings-btn');
             const ratioBtn = document.getElementById('ratio-btn');
             const flipBtn = document.getElementById('flip-cam-btn');
+            const rotateBtn = document.getElementById('rotate-btn');
 
             if (state.isRecording) {
                 // Recording Mode
@@ -577,6 +598,7 @@
                 settingsBtn.classList.add('opacity-0', 'pointer-events-none');
                 ratioBtn.classList.add('opacity-0', 'pointer-events-none');
                 flipBtn.classList.add('opacity-0', 'pointer-events-none');
+                rotateBtn.classList.add('opacity-0', 'pointer-events-none'); // Hide rotate during record
                 document.getElementById('settings-panel').classList.add('hidden');
             } else {
                 // Standby Mode
@@ -589,6 +611,7 @@
                 settingsBtn.classList.remove('opacity-0', 'pointer-events-none');
                 ratioBtn.classList.remove('opacity-0', 'pointer-events-none');
                 flipBtn.classList.remove('opacity-0', 'pointer-events-none');
+                rotateBtn.classList.remove('opacity-0', 'pointer-events-none');
                 document.getElementById('timer').innerText = "00:00";
             }
         }
@@ -639,6 +662,13 @@
             }
             
             showToast(label);
+        });
+
+        // Rotate Button Logic
+        document.getElementById('rotate-btn').addEventListener('click', () => {
+            state.settings.rotation = (state.settings.rotation + 90) % 360;
+            updateCanvasTransform();
+            showToast(`Rotate ${state.settings.rotation}°`);
         });
 
         document.getElementById('close-settings').addEventListener('click', () => {
