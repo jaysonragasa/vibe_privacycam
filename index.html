@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Privacy Cam</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- TensorFlow.js and Blazeface Model -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface"></script>
+
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <style>
+        body {
+            background-color: #000;
+            color: white;
+            overflow: hidden; /* Prevent scrolling */
+            touch-action: none;
+        }
+        
+        /* Ensure canvas fills screen but maintains aspect ratio logic if needed, 
+           here we cover object-fit style manually via JS resizing */
+        #output-canvas {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+            transition: all 0.3s ease-out;
+        }
+
+        /* Hide the raw video input - Changed to opacity 0 instead of display none to ensure frame updates on mobile */
+        #video-feed {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 1px;
+            height: 1px;
+            opacity: 0;
+            pointer-events: none;
+            z-index: -1;
+        }
+
+        .glass-panel {
+            background: rgba(20, 20, 20, 0.9);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        /* Range Slider Styling */
+        input[type=range] {
+            -webkit-appearance: none;
+            width: 100%;
+            background: transparent;
+        }
+        
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 14px;
+            width: 14px;
+            border-radius: 50%;
+            background: #ffffff;
+            cursor: pointer;
+            margin-top: -5px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+        }
+        
+        input[type=range]::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 4px;
+            cursor: pointer;
+            background: #4B5563;
+            border-radius: 2px;
+        }
+
+        /* Animation for recording indicator */
+        @keyframes pulse {
+            0% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(1.1); }
+            100% { opacity: 1; transform: scale(1); }
+        }
+        .recording-dot {
+            animation: pulse 1.5s infinite;
+        }
+        
+        /* Scrollable settings if they get too tall on small screens */
+        .settings-content {
+            max-height: 60vh;
+            overflow-y: auto;
+        }
+
+        .toast-enter {
+            opacity: 0;
+            transform: translate(-50%, 20px);
+        }
+        .toast-enter-active {
+            opacity: 1;
+            transform: translate(-50%, 0);
+            transition: all 0.3s ease-out;
+        }
+        .toast-exit {
+            opacity: 1;
+            transform: translate(-50%, 0);
+        }
+        .toast-exit-active {
+            opacity: 0;
+            transform: translate(-50%, -20px);
+            transition: all 0.3s ease-in;
+        }
+    </style>
+</head>
+<body class="h-screen w-screen relative flex flex-col items-center justify-center">
+
+    <!-- Loading Overlay -->
+    <div id="loading-screen" class="absolute inset-0 z-50 bg-black flex flex-col items-center justify-center space-y-4">
+        <div class="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-white"></div>
+        <p class="text-gray-400 text-sm">Loading AI Models...</p>
+    </div>
+
+    <!-- Ratio Toast -->
+    <div id="ratio-toast" class="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-40 pointer-events-none opacity-0 transition-opacity duration-300">
+        <div class="glass-panel px-6 py-3 rounded-full">
+            <span id="ratio-text" class="text-white font-bold text-xl tracking-widest">FULL</span>
+        </div>
+    </div>
+
+    <!-- Hidden Video Source -->
+    <video id="video-feed" playsinline autoplay muted></video>
+
+    <!-- Main Output Canvas -->
+    <canvas id="output-canvas"></canvas>
+
+    <!-- Top Bar: Status & Time -->
+    <div class="absolute top-0 left-0 w-full p-4 flex justify-between items-start z-20 pointer-events-none">
+        <div id="recording-indicator" class="hidden flex items-center space-x-2 bg-red-500/20 px-3 py-1 rounded-full backdrop-blur-sm border border-red-500/30">
+            <div class="w-3 h-3 bg-red-500 rounded-full recording-dot"></div>
+            <span id="timer" class="text-white text-sm font-mono font-bold">00:00</span>
+        </div>
+        <div class="flex-1"></div> <!-- Spacer -->
+    </div>
+
+    <!-- Settings Panel (Compact) -->
+    <div id="settings-panel" class="absolute bottom-24 left-4 right-4 z-30 hidden">
+        <div class="glass-panel rounded-xl p-3 space-y-3 text-xs animate-in slide-in-from-bottom-10 fade-in duration-200 settings-content shadow-2xl">
+            <div class="flex justify-between items-center mb-1">
+                <h3 class="font-semibold text-white text-sm">Settings</h3>
+                <button id="close-settings" class="text-gray-400 hover:text-white">
+                    <i data-lucide="x" class="w-4 h-4"></i>
+                </button>
+            </div>
+            
+            <!-- Row 1: Toggles (Grid) -->
+            <div class="grid grid-cols-2 gap-3">
+                <!-- Mode -->
+                <div class="space-y-1">
+                    <label class="text-gray-400 text-[10px] uppercase tracking-wider font-bold">Effect</label>
+                    <div class="flex bg-gray-800 rounded-lg p-0.5">
+                        <button class="mode-btn flex-1 py-1.5 rounded-md font-medium transition-all bg-gray-600 text-white" data-mode="blur">Blur</button>
+                        <button class="mode-btn flex-1 py-1.5 rounded-md font-medium transition-all text-gray-400 hover:text-white" data-mode="pixelate">Pixel</button>
+                    </div>
+                </div>
+                <!-- Shape -->
+                <div class="space-y-1">
+                    <label class="text-gray-400 text-[10px] uppercase tracking-wider font-bold">Shape</label>
+                    <div class="flex bg-gray-800 rounded-lg p-0.5">
+                        <button class="shape-btn flex-1 py-1.5 rounded-md font-medium transition-all bg-gray-600 text-white" data-shape="circle">Circle</button>
+                        <button class="shape-btn flex-1 py-1.5 rounded-md font-medium transition-all text-gray-400 hover:text-white" data-shape="rect">Rect</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Row 2: Intensity -->
+            <div class="space-y-1 pt-2 border-t border-gray-700/50">
+                <div class="flex justify-between text-gray-400">
+                    <label class="uppercase tracking-wider text-[10px] font-bold">Intensity</label>
+                    <span id="intensity-val">50%</span>
+                </div>
+                <input type="range" id="intensity-slider" min="1" max="100" value="50">
+            </div>
+
+            <!-- Row 3: Dimensions Grid -->
+            <div class="grid grid-cols-2 gap-3 pt-1">
+                <div class="space-y-1">
+                    <div class="flex justify-between text-gray-400">
+                        <label class="uppercase tracking-wider text-[10px] font-bold">Width</label>
+                        <span id="width-val">120%</span>
+                    </div>
+                    <input type="range" id="width-slider" min="50" max="250" value="120">
+                </div>
+                
+                <div class="space-y-1">
+                    <div class="flex justify-between text-gray-400">
+                        <label class="uppercase tracking-wider text-[10px] font-bold">Height</label>
+                        <span id="height-val">120%</span>
+                    </div>
+                    <input type="range" id="height-slider" min="50" max="250" value="120">
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bottom Controls -->
+    <div class="absolute bottom-0 w-full p-6 pb-8 z-20 flex items-center justify-between bg-gradient-to-t from-black/80 to-transparent gap-4">
+        
+        <!-- Settings Toggle -->
+        <button id="settings-btn" class="p-4 rounded-full glass-panel hover:bg-gray-800 transition-colors">
+            <i data-lucide="sliders-horizontal" class="w-6 h-6 text-white"></i>
+        </button>
+
+        <!-- Ratio Toggle -->
+        <button id="ratio-btn" class="p-4 rounded-full glass-panel hover:bg-gray-800 transition-colors">
+            <i data-lucide="proportions" class="w-6 h-6 text-white"></i>
+        </button>
+
+        <!-- Record Button -->
+        <button id="record-btn" class="relative group transition-all duration-300 transform active:scale-95">
+            <!-- Ring -->
+            <div class="absolute inset-0 rounded-full border-4 border-white opacity-80 group-hover:scale-110 transition-transform duration-300"></div>
+            <!-- Inner Circle (Red/Stop) -->
+            <div id="record-inner" class="w-16 h-16 bg-red-600 rounded-full m-1 transition-all duration-300 flex items-center justify-center">
+                <div id="stop-icon" class="w-6 h-6 bg-transparent rounded-sm transition-all"></div> 
+            </div>
+        </button>
+
+        <!-- Flip Cam -->
+        <button id="flip-cam-btn" class="p-4 rounded-full glass-panel hover:bg-gray-800 transition-colors">
+            <i data-lucide="refresh-ccw" class="w-6 h-6 text-white"></i>
+        </button>
+    </div>
+
+    <!-- Hidden download link -->
+    <a id="download-link" style="display:none"></a>
+
+    <script>
+        // --- State Management ---
+        const state = {
+            isRecording: false,
+            model: null,
+            video: document.getElementById('video-feed'),
+            canvas: document.getElementById('output-canvas'),
+            ctx: document.getElementById('output-canvas').getContext('2d', { willReadFrequently: true }),
+            stream: null,
+            mediaRecorder: null,
+            recordedChunks: [],
+            startTime: 0,
+            timerInterval: null,
+            settings: {
+                mode: 'blur', // 'blur' or 'pixelate'
+                shape: 'circle', // 'circle' or 'rect'
+                intensity: 50, // 1-100
+                widthScale: 1.2,
+                heightScale: 1.2,
+                facingMode: 'user', // 'user' or 'environment'
+                aspectRatio: 'full' // 'full', '1:1', '3:4', '9:16' (keys only, logic adapts)
+            },
+            crop: { x: 0, y: 0, w: 0, h: 0 },
+            renderId: null,
+            detectId: null,
+            lastPredictions: [], // Store latest face data
+            ratioOptions: ['full', '1:1', '3:4', '9:16'],
+            currentRatioIndex: 0
+        };
+
+        // --- Initialization ---
+        
+        async function init() {
+            lucide.createIcons();
+            
+            try {
+                // Initialize TensorFlow backend first
+                await tf.setBackend('webgl');
+                await tf.ready();
+                
+                // Load Blazeface model
+                state.model = await blazeface.load();
+                document.getElementById('loading-screen').style.display = 'none';
+                
+                // Start Camera
+                await setupCamera();
+                
+                // Start Loops
+                startLoops();
+                
+            } catch (err) {
+                console.error("Initialization Error:", err);
+                alert("Error initializing app. Please ensure camera permissions are granted. " + err.message);
+                document.getElementById('loading-screen').innerHTML = `<p class="text-red-500 text-center px-4">Error: ${err.message}<br>Try refreshing.</p>`;
+            }
+        }
+
+        async function setupCamera() {
+            if (state.stream) {
+                state.stream.getTracks().forEach(track => track.stop());
+            }
+
+            const constraints = {
+                audio: false, // Audio can cause feedback loops if not careful, keeping it simple for video focus
+                video: {
+                    facingMode: state.settings.facingMode,
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 }
+                }
+            };
+
+            state.stream = await navigator.mediaDevices.getUserMedia(constraints);
+            state.video.srcObject = state.stream;
+            
+            // Explicitly play to ensure mobile browsers start the stream
+            state.video.play().catch(e => console.log("Play failed (usually due to interaction policy), but stream should be active", e));
+            
+            return new Promise((resolve) => {
+                state.video.onloadedmetadata = () => {
+                    resolve();
+                };
+            });
+        }
+
+        function resizeCanvas() {
+            const video = state.video;
+            if (video.videoWidth === 0 || video.videoHeight === 0) return;
+
+            const vw = video.videoWidth;
+            const vh = video.videoHeight;
+            const isLandscape = vw > vh; // Determine orientation from source
+
+            let targetW, targetH;
+
+            // Determine Target Dimensions based on Ratio
+            const ratioType = state.settings.aspectRatio;
+            
+            if (ratioType === 'full') {
+                targetW = vw;
+                targetH = vh;
+            } else {
+                let targetRatio = 1;
+                
+                if (ratioType === '1:1') {
+                    targetRatio = 1;
+                } 
+                else if (ratioType === '3:4') {
+                    // Adapt 3:4 to 4:3 if in landscape
+                    targetRatio = isLandscape ? 4/3 : 3/4;
+                } 
+                else if (ratioType === '9:16') {
+                    // Adapt 9:16 to 16:9 if in landscape
+                    targetRatio = isLandscape ? 16/9 : 9/16;
+                }
+
+                const sourceRatio = vw / vh;
+
+                if (targetRatio < sourceRatio) {
+                    // Target is narrower than source (e.g. source 16:9, target 4:3)
+                    // Constrain by Height
+                    targetH = vh;
+                    targetW = targetH * targetRatio;
+                } else {
+                    // Target is wider than source (e.g. source 4:3, target 16:9)
+                    // Constrain by Width
+                    targetW = vw;
+                    targetH = targetW / targetRatio;
+                }
+            }
+
+            // Calculate Crop (Center)
+            state.crop.w = targetW;
+            state.crop.h = targetH;
+            state.crop.x = (vw - targetW) / 2;
+            state.crop.y = (vh - targetH) / 2;
+
+            // Update Canvas Resolution
+            state.canvas.width = targetW;
+            state.canvas.height = targetH;
+        }
+
+        window.addEventListener('resize', resizeCanvas);
+
+        // --- Main Loops ---
+
+        function startLoops() {
+            // Decouple Rendering and Detection for smoother performance
+            renderLoop();
+            detectLoop();
+        }
+
+        // Loop 1: High FPS Rendering (Visuals)
+        function renderLoop() {
+            if (state.video.readyState >= 2) {
+                // Ensure dimensions are initialized
+                if (state.canvas.width === 0 || state.canvas.width !== state.crop.w) {
+                    resizeCanvas();
+                }
+
+                // Draw video frame with Crop
+                if (state.canvas.width > 0 && state.crop.w > 0) {
+                    state.ctx.drawImage(
+                        state.video, 
+                        state.crop.x, state.crop.y, state.crop.w, state.crop.h, // Source (Crop)
+                        0, 0, state.canvas.width, state.canvas.height // Destination (Full Canvas)
+                    );
+                    
+                    // Draw Effects based on LAST KNOWN predictions
+                    if (state.lastPredictions.length > 0) {
+                        state.lastPredictions.forEach(prediction => {
+                            // Adjust coordinates relative to crop
+                            const startX = prediction.topLeft[0] - state.crop.x;
+                            const startY = prediction.topLeft[1] - state.crop.y;
+                            const endX = prediction.bottomRight[0] - state.crop.x;
+                            const endY = prediction.bottomRight[1] - state.crop.y;
+                            
+                            const sizeW = endX - startX;
+                            const sizeH = endY - startY;
+
+                            applyPrivacyFilter(startX, startY, sizeW, sizeH);
+                        });
+                    }
+                }
+            }
+            state.renderId = requestAnimationFrame(renderLoop);
+        }
+
+        // Loop 2: Async Detection (AI) - Runs as fast as it can without blocking render
+        async function detectLoop() {
+            if (state.video.readyState >= 2 && state.model) {
+                try {
+                    // This await allows other tasks (like rendering) to happen in between
+                    const predictions = await state.model.estimateFaces(state.video, false);
+                    state.lastPredictions = predictions;
+                } catch (e) {
+                    console.warn("Detection error (usually transient):", e);
+                }
+            }
+            // Use requestAnimationFrame for detection loop too to be good citizens
+            state.detectId = requestAnimationFrame(detectLoop);
+        }
+
+        function applyPrivacyFilter(x, y, w, h) {
+            const ctx = state.ctx;
+            const { intensity, widthScale, heightScale, shape, mode } = state.settings;
+            
+            // Calculate center
+            const centerX = x + w / 2;
+            const centerY = y + h / 2;
+
+            // Apply scaling to the bounding box
+            const finalW = w * widthScale;
+            const finalH = h * heightScale;
+
+            // Calculate new top-left based on center
+            const finalX = centerX - finalW / 2;
+            const finalY = centerY - finalH / 2;
+
+            ctx.save();
+            ctx.beginPath();
+
+            if (shape === 'circle') {
+                // Circle uses largest dimension to ensure coverage
+                const radius = Math.max(finalW, finalH) / 2;
+                ctx.arc(centerX, centerY, radius, 0, 2 * Math.PI);
+            } else {
+                // Rectangle
+                ctx.rect(finalX, finalY, finalW, finalH);
+            }
+            
+            ctx.clip();
+
+            if (mode === 'blur') {
+                // Blur Effect
+                const blurAmount = Math.max(2, Math.floor(intensity / 3));
+                ctx.filter = `blur(${blurAmount}px)`;
+                ctx.drawImage(state.canvas, finalX, finalY, finalW, finalH, finalX, finalY, finalW, finalH);
+            } else {
+                // Pixelate Effect
+                const pixelSize = Math.max(4, Math.floor(intensity / 1.5));
+                ctx.imageSmoothingEnabled = false;
+                
+                if (finalW > 0 && finalH > 0) {
+                    const tempCanvas = document.createElement('canvas');
+                    tempCanvas.width = Math.max(1, finalW / pixelSize);
+                    tempCanvas.height = Math.max(1, finalH / pixelSize);
+                    const tempCtx = tempCanvas.getContext('2d');
+                    
+                    tempCtx.drawImage(state.canvas, finalX, finalY, finalW, finalH, 0, 0, tempCanvas.width, tempCanvas.height);
+                    ctx.drawImage(tempCanvas, 0, 0, tempCanvas.width, tempCanvas.height, finalX, finalY, finalW, finalH);
+                }
+            }
+
+            ctx.restore();
+            ctx.filter = 'none'; // Reset filter
+        }
+
+        // --- Recording Logic ---
+
+        function toggleRecording() {
+            if (state.isRecording) {
+                stopRecording();
+            } else {
+                startRecording();
+            }
+        }
+
+        function startRecording() {
+            const stream = state.canvas.captureStream(30); // 30 FPS
+            const mimeTypes = [
+                'video/webm;codecs=vp9',
+                'video/webm',
+                'video/mp4'
+            ];
+            
+            let selectedType = mimeTypes.find(type => MediaRecorder.isTypeSupported(type)) || '';
+
+            try {
+                state.mediaRecorder = new MediaRecorder(stream, { mimeType: selectedType });
+            } catch (e) {
+                console.warn("MediaRecorder init failed with specific types, trying default.", e);
+                state.mediaRecorder = new MediaRecorder(stream);
+            }
+
+            state.recordedChunks = [];
+            state.mediaRecorder.ondataavailable = (e) => {
+                if (e.data.size > 0) state.recordedChunks.push(e.data);
+            };
+
+            state.mediaRecorder.onstop = saveVideo;
+
+            state.mediaRecorder.start();
+            state.isRecording = true;
+            state.startTime = Date.now();
+            updateUIState();
+            
+            state.timerInterval = setInterval(updateTimer, 1000);
+        }
+
+        function stopRecording() {
+            state.mediaRecorder.stop();
+            state.isRecording = false;
+            clearInterval(state.timerInterval);
+            updateUIState();
+        }
+
+        function saveVideo() {
+            const blob = new Blob(state.recordedChunks, { type: 'video/webm' });
+            const url = URL.createObjectURL(blob);
+            const a = document.getElementById('download-link');
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+            a.href = url;
+            a.download = `privacy-cam-${timestamp}.webm`;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        // --- UI Handling ---
+
+        function updateUIState() {
+            const btnInner = document.getElementById('record-inner');
+            const stopIcon = document.getElementById('stop-icon');
+            const indicator = document.getElementById('recording-indicator');
+            const settingsBtn = document.getElementById('settings-btn');
+            const ratioBtn = document.getElementById('ratio-btn');
+            const flipBtn = document.getElementById('flip-cam-btn');
+
+            if (state.isRecording) {
+                // Recording Mode
+                btnInner.classList.remove('rounded-full');
+                btnInner.classList.add('rounded-md', 'scale-50');
+                stopIcon.classList.add('bg-white');
+                
+                indicator.classList.remove('hidden');
+                
+                settingsBtn.classList.add('opacity-0', 'pointer-events-none');
+                ratioBtn.classList.add('opacity-0', 'pointer-events-none');
+                flipBtn.classList.add('opacity-0', 'pointer-events-none');
+                document.getElementById('settings-panel').classList.add('hidden');
+            } else {
+                // Standby Mode
+                btnInner.classList.add('rounded-full');
+                btnInner.classList.remove('rounded-md', 'scale-50');
+                stopIcon.classList.remove('bg-white');
+                
+                indicator.classList.add('hidden');
+                
+                settingsBtn.classList.remove('opacity-0', 'pointer-events-none');
+                ratioBtn.classList.remove('opacity-0', 'pointer-events-none');
+                flipBtn.classList.remove('opacity-0', 'pointer-events-none');
+                document.getElementById('timer').innerText = "00:00";
+            }
+        }
+
+        function updateTimer() {
+            const diff = Math.floor((Date.now() - state.startTime) / 1000);
+            const mins = Math.floor(diff / 60).toString().padStart(2, '0');
+            const secs = (diff % 60).toString().padStart(2, '0');
+            document.getElementById('timer').innerText = `${mins}:${secs}`;
+        }
+
+        // Toast Helper
+        function showToast(message) {
+            const toast = document.getElementById('ratio-toast');
+            const text = document.getElementById('ratio-text');
+            text.innerText = message.toUpperCase();
+            
+            toast.classList.remove('opacity-0');
+            setTimeout(() => {
+                toast.classList.add('opacity-0');
+            }, 1500);
+        }
+
+        // Event Listeners
+        document.getElementById('record-btn').addEventListener('click', toggleRecording);
+        
+        document.getElementById('settings-btn').addEventListener('click', () => {
+            const panel = document.getElementById('settings-panel');
+            panel.classList.toggle('hidden');
+        });
+
+        document.getElementById('ratio-btn').addEventListener('click', () => {
+            // Cycle Ratio
+            state.currentRatioIndex = (state.currentRatioIndex + 1) % state.ratioOptions.length;
+            const newRatio = state.ratioOptions[state.currentRatioIndex];
+            state.settings.aspectRatio = newRatio;
+            
+            // Trigger Resize Logic
+            resizeCanvas();
+            
+            // Smart Label for Toast based on Orientation
+            let label = newRatio;
+            const isLandscape = state.video.videoWidth > state.video.videoHeight;
+            
+            if (isLandscape) {
+                if (newRatio === '3:4') label = '4:3';
+                if (newRatio === '9:16') label = '16:9';
+            }
+            
+            showToast(label);
+        });
+
+        document.getElementById('close-settings').addEventListener('click', () => {
+            document.getElementById('settings-panel').classList.add('hidden');
+        });
+
+        document.getElementById('flip-cam-btn').addEventListener('click', async () => {
+            state.settings.facingMode = state.settings.facingMode === 'user' ? 'environment' : 'user';
+            await setupCamera();
+        });
+
+        // Settings Inputs
+        const modeBtns = document.querySelectorAll('.mode-btn');
+        modeBtns.forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                state.settings.mode = e.target.dataset.mode;
+                updateButtonStyles(modeBtns, e.target);
+            });
+        });
+
+        const shapeBtns = document.querySelectorAll('.shape-btn');
+        shapeBtns.forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                state.settings.shape = e.target.dataset.shape;
+                updateButtonStyles(shapeBtns, e.target);
+            });
+        });
+
+        function updateButtonStyles(buttons, activeBtn) {
+            buttons.forEach(b => {
+                b.classList.remove('bg-gray-600', 'text-white');
+                b.classList.add('text-gray-400');
+            });
+            activeBtn.classList.remove('text-gray-400');
+            activeBtn.classList.add('bg-gray-600', 'text-white');
+        }
+
+        const intensitySlider = document.getElementById('intensity-slider');
+        intensitySlider.addEventListener('input', (e) => {
+            state.settings.intensity = e.target.value;
+            document.getElementById('intensity-val').innerText = `${e.target.value}%`;
+        });
+
+        const widthSlider = document.getElementById('width-slider');
+        widthSlider.addEventListener('input', (e) => {
+            state.settings.widthScale = e.target.value / 100;
+            document.getElementById('width-val').innerText = `${e.target.value}%`;
+        });
+
+        const heightSlider = document.getElementById('height-slider');
+        heightSlider.addEventListener('input', (e) => {
+            state.settings.heightScale = e.target.value / 100;
+            document.getElementById('height-val').innerText = `${e.target.value}%`;
+        });
+
+        // Start App
+        window.onload = init;
+
+    </script>
+</body>
+</html>
